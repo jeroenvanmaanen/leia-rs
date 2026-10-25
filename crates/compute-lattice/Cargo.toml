@@ -1,0 +1,20 @@
+[package]
+name = "compute-lattice"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+description.workspace = true
+
+[lib]
+name = "compute_lattice"
+path = "src/lib/mod.rs"
+
+[[bin]]
+name = "compute-lattice"
+path = "src/bin/main.rs"
+
+[dependencies]
+
+anyhow.workspace = true
+env_logger.workspace = true
+log.workspace = true
