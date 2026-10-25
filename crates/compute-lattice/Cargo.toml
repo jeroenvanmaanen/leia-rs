@@ -18,3 +18,4 @@ path = "src/bin/main.rs"
 anyhow.workspace = true
 env_logger.workspace = true
 log.workspace = true
+rational.workspace = true
