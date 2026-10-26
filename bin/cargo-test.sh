@@ -17,5 +17,5 @@ mkdir -p "${PROJECT}/tmp"
 (
     cd "${PROJECT}"
     export RUST_LOG='info,igor=debug'
-    cargo --color "${COLOR}" test -- --nocapture "$@" 2>&1 | tee ~/tmp/cargo-test-leia.log
+    cargo --color "${COLOR}" test -- --test-threads 1 --nocapture "$@" 2>&1 | tee ~/tmp/cargo-test-leia.log
 )

@@ -16,6 +16,7 @@ impl Rationals {
     }
 }
 
+#[derive(Debug)]
 struct Threshold {
     bound_a: Rational,
     bound_b: Rational,
@@ -367,5 +368,39 @@ mod test {
             true,
             Rational::new(5, 4),
         );
+    }
+
+    fn test_weight(weight: u64) {
+        info!("Thresholds for {weight}: [");
+        for threshold in get_thresholds(weight) {
+            info!("  {threshold:?}")
+        }
+        info!("]");
+        info!("");
+    }
+
+    const TEST_WEIGHTS: &[u64] = &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 100, 1000];
+
+    #[test]
+    fn test_weights() {
+        for weight in TEST_WEIGHTS {
+            test_weight(*weight);
+        }
+    }
+
+    fn test_get_rationals(weight: u64) {
+        let rationals = get_rationals(weight);
+        info!("Rationals for weight: {weight}");
+        for (w, r) in rationals.segments {
+            info!("  ({w}, {r})");
+        }
+        info!("");
+    }
+
+    #[test]
+    fn test_get_rationals_for_weights() {
+        for weight in TEST_WEIGHTS {
+            test_get_rationals(*weight);
+        }
     }
 }
