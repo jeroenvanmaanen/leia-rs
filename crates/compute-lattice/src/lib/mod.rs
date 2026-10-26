@@ -302,3 +302,70 @@ fn continued_fraction_expand_r(
 fn int_part(r: Rational) -> u64 {
     r.mixed_fraction().0 as u64
 }
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use log::info;
+    use test_log::test;
+
+    fn test_continued_fraction(
+        a: Rational,
+        b: Rational,
+        include_a: bool,
+        include_b: bool,
+        expected: Rational,
+    ) {
+        let continued_fraction = continued_fraction_expand_r(a, b, include_a, include_b);
+        let rational = continued_fraction_compute(&mut continued_fraction.iter());
+        info!("");
+        info!("Interval: {include_a}, {a}, {b}, {include_b}");
+        info!("Continued fraction expand: {continued_fraction:?}");
+        info!("Corresponding rational: {rational}");
+        if include_a {
+            assert!(a <= rational);
+        } else {
+            assert!(a < rational);
+        }
+        if include_b {
+            assert!(rational <= b);
+        } else {
+            assert!(rational < b);
+        }
+        assert_eq!(expected, rational);
+    }
+
+    #[test]
+    fn test_continued_fractions() {
+        info!("");
+        info!("Test continued fractions");
+        test_continued_fraction(
+            Rational::new(5, 4),
+            Rational::new(1330, 1000),
+            false,
+            false,
+            Rational::new(9, 7),
+        );
+        test_continued_fraction(
+            Rational::new(5, 4),
+            Rational::new(1330, 1000),
+            true,
+            false,
+            Rational::new(5, 4),
+        );
+        test_continued_fraction(
+            Rational::new(124, 100),
+            Rational::new(5, 4),
+            false,
+            false,
+            Rational::new(36, 29),
+        );
+        test_continued_fraction(
+            Rational::new(1241, 1000),
+            Rational::new(5, 4),
+            false,
+            true,
+            Rational::new(5, 4),
+        );
+    }
+}
