@@ -21,6 +21,7 @@ env_logger.workspace = true
 log.workspace = true
 rand.workspace = true
 rational.workspace = true
+regex.workspace = true
 
 [dev-dependencies]
 

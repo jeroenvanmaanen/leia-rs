@@ -314,6 +314,7 @@ dependencies = [
  "log",
  "rand",
  "rational",
+ "regex",
  "test-log",
 ]
 

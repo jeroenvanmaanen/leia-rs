@@ -1,7 +1,10 @@
 use std::collections::{BTreeSet, VecDeque};
 use std::fmt::{Debug, Formatter};
+use std::sync::LazyLock;
 
+use anyhow::{Result, anyhow};
 use log::{info, trace};
+use regex::Regex;
 
 use crate::implementation::DistributionDescription::Split;
 use crate::implementation::DistributionDescription::Uniform;
@@ -9,7 +12,6 @@ use crate::implementation::DistributionDescription::Uniform;
 use super::Description;
 use super::Distribution as DistributionTrait;
 
-#[derive(Debug)]
 enum DistributionDescription {
     Uniform(usize),
     Split {
@@ -20,9 +22,75 @@ enum DistributionDescription {
     },
 }
 
+impl DistributionDescription {
+    fn evaluate(&self, distribution: &Distribution, fraction: f64) -> Result<f64> {
+        if fraction < 0.0 || fraction > 1.0 {
+            return Err(anyhow!("Invalid fraction: [{fraction}]"));
+        }
+        let dm = distribution.counts.len();
+        match self {
+            Uniform(m) => {
+                if *m != dm {
+                    return Err(anyhow!("Mismatch: [{m}] != [{dm}]"));
+                }
+                trace!("Evaluate uniform: {distribution:?}");
+                if dm == 0 {
+                    return Ok(0.0);
+                }
+                if dm == 1 {
+                    let avg_length = fraction.log2();
+                    return Ok(distribution.counts[0] as f64 * avg_length);
+                }
+                let p = fraction / (dm as f64);
+                let avg_length = p.log2();
+                let n: u64 = distribution.counts.iter().sum();
+                let model_length = 1.0;
+                Ok(model_length + (n as f64) * avg_length)
+            }
+            Split {
+                p: probability,
+                split,
+                probable,
+                improbable,
+            } => {
+                let m = split.length() as usize;
+                if m != dm {
+                    return Err(anyhow!("Mismatch: [{m}] != [{dm}]"));
+                }
+                let numerator = probability.numerator.0 as f64;
+                let denominator = (probability.numerator.0 + probability.weight.0) as f64;
+                let p = fraction * numerator / denominator;
+                let mut probable_counts = vec![];
+                let mut improbable_counts = vec![];
+                for (b, c) in split.bits().zip(distribution.counts.iter()) {
+                    if b {
+                        probable_counts.push(*c);
+                    } else {
+                        improbable_counts.push(*c);
+                    }
+                }
+                let probable_distribution = Distribution::new(probable_counts);
+                let improbable_distribution = Distribution::new(improbable_counts);
+                trace!(
+                    "Evaluate split: {probability:?} {probable_distribution:?} {improbable_distribution:?}"
+                );
+                let probable_length = probable.evaluate(&probable_distribution, p)?;
+                let improbable_length = improbable.evaluate(&improbable_distribution, 1.0 - p)?;
+
+                let model_length = 1 + probability.length() + split.length();
+                Ok((model_length as f64) + probable_length + improbable_length)
+            }
+        }
+    }
+}
+
 impl Description for DistributionDescription {
     fn bits(&self) -> impl Iterator<Item = bool> {
         match self {
+            Uniform(m) if *m < 2 => {
+                let empty = vec![];
+                bit_vec_bits(&empty)
+            }
             Uniform(_) => {
                 let single = vec![BitString::new(0, 1)];
                 bit_vec_bits(&single)
@@ -42,53 +110,123 @@ impl Description for DistributionDescription {
     }
 }
 
+impl Debug for DistributionDescription {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Uniform(m) if *m < 2 => {
+                f.debug_tuple("Uniform").field(m).finish()?;
+                f.write_str(" ''")
+            }
+            Self::Uniform(m) => {
+                f.debug_tuple("Uniform").field(m).finish()?;
+                f.write_str(" '0'")
+            }
+            Self::Split {
+                p,
+                split,
+                probable,
+                improbable,
+            } => {
+                f.write_str("Split['1 ")?;
+                f.write_fmt(format_args!("s={:?}", split))?;
+                f.write_fmt(format_args!("' p={:?}", p))?;
+                f.write_fmt(format_args!(" Prob{{{probable:?}}}"))?;
+                f.write_fmt(format_args!(" Imp{{{improbable:?}}}"))
+            }
+        }
+    }
+}
+
 /// p = n / (n + w) \in [0, 1]
 struct Probability {
-    numerator: u64,
-    weight: u64,
+    numerator: PrefixFree,
+    weight: PrefixFree,
 }
 
 impl Probability {
-    fn new(numerator: u64, weight: u64) -> Probability {
+    fn new(n: u64, w: u64) -> Probability {
+        let numerator = PrefixFree(n);
+        let weight = PrefixFree(w);
         Probability { numerator, weight }
+    }
+}
+
+impl Description for Probability {
+    fn bits(&self) -> impl Iterator<Item = bool> {
+        self.numerator.bits().chain(self.weight.bits())
+    }
+
+    fn length(&self) -> u64 {
+        self.numerator.length() + self.weight.length()
     }
 }
 
 impl Debug for Probability {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        let s = format!("({}/{})", self.numerator, self.numerator + self.weight);
-        f.write_str(&s)
+        f.write_fmt(format_args!(
+            "({}/{}) n={:?} w={:?}",
+            self.numerator.0,
+            self.numerator.0 + self.weight.0,
+            self.numerator,
+            self.weight,
+        ))
     }
 }
 
-impl Description for u64 {
+struct PrefixFree(u64);
+
+impl PrefixFree {
+    fn to_bit_strings(&self) -> Vec<BitString> {
+        let bigger = self.0 + 1;
+        let mut length = bigger.ilog2();
+        trace!("Bigger: {bigger}: ({length})");
+        let mut bit_strings = vec![BitString {
+            bits: bigger as u128,
+            count: (length + 1) as u8,
+        }];
+        while length > 0 {
+            let length_of_length = length.ilog2();
+            trace!("Length of length: {length}: ({length_of_length})");
+            let leading_bit = 1 << length_of_length;
+            let length_string = BitString {
+                bits: (length ^ leading_bit) as u128,
+                count: (length_of_length + 1) as u8,
+            };
+            bit_strings.insert(0, length_string);
+            length = length_of_length;
+        }
+        bit_strings
+    }
+}
+
+impl Description for PrefixFree {
     fn bits(&self) -> impl Iterator<Item = bool> {
-        let v = to_bit_strings(*self);
+        let v = self.to_bit_strings();
         bit_vec_bits(&v)
     }
     fn length(&self) -> u64 {
-        let bit_strings = to_bit_strings(*self);
+        let bit_strings = self.to_bit_strings();
         bit_strings.length()
     }
 }
 
-fn to_bit_strings(n: u64) -> Vec<BitString> {
-    let bigger = n + 1;
-    let length = bigger.ilog2();
-    let mut bit_strings = vec![BitString {
-        bits: bigger as u128,
-        count: (length + 1) as u8,
-    }];
-    while length > 0 {
-        let length_of_length = length.ilog2();
-        let leading_bit = 1 << length_of_length;
-        let length_string = BitString {
-            bits: (length ^ leading_bit) as u128,
-            count: (length_of_length + 1) as u8,
-        };
-        bit_strings.insert(0, length_string);
+impl Debug for PrefixFree {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        static FIRST_RE: LazyLock<Regex> =
+            LazyLock::new(|| Regex::new("^(?<f>.)").expect("valid regex"));
+        f.write_str("'")?;
+        let mut bit_strings = self.to_bit_strings();
+        if let Some(last) = bit_strings.pop() {
+            for bit_string in bit_strings {
+                let formatted = format!("{bit_string:?}");
+                let annotated = FIRST_RE.replace(&formatted, "${f}¹");
+                f.write_fmt(format_args!("{annotated} "))?
+            }
+            f.write_fmt(format_args!("{last:?}"))?;
+        }
+        f.write_str("'")?;
+        Ok(())
     }
-    bit_strings
 }
 
 struct BitVecIterator {
@@ -198,17 +336,16 @@ impl Description for BitString {
 impl Debug for BitString {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         for b in self.bits() {
-            if b {
-                f.write_str("1")?;
-            } else {
-                f.write_str("0")?;
-            }
+            f.write_str(to_binary_digit(b))?;
         }
         Ok(())
     }
 }
 
-#[derive(Debug)]
+fn to_binary_digit(b: bool) -> &'static str {
+    if b { "1" } else { "0" }
+}
+
 struct Distribution {
     counts: Vec<u64>,
 }
@@ -216,6 +353,16 @@ struct Distribution {
 impl Distribution {
     fn new(counts: Vec<u64>) -> Distribution {
         Distribution { counts }
+    }
+}
+
+impl Debug for Distribution {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.write_str("[#")?;
+        for c in &self.counts {
+            f.write_fmt(format_args!(" {c}"))?;
+        }
+        f.write_str(" #]")
     }
 }
 
@@ -265,8 +412,7 @@ impl PartialEq for Pair {
 
 impl Debug for Pair {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        let formatted = format!("<#{},@{}>", self.count, self.index);
-        f.write_str(&formatted)
+        f.write_fmt(format_args!("<#{},@{}>", self.count, self.index))
     }
 }
 
@@ -343,7 +489,8 @@ impl Distribution {
 impl DistributionTrait for Distribution {
     fn encode(&self) -> impl Description {
         let result = self.encode_private();
-        info!("Encoded distribution {result:?}");
+        let description_length = result.evaluate(self, 1.0).ok();
+        info!("Encoded distribution {result:?} (DL: {description_length:?})");
         result
     }
 }
@@ -382,6 +529,17 @@ mod test {
                 assert!(first.index <= second.index)
             }
             info!("Ordered: [{first:?}] before [{second:?}]");
+        }
+    }
+
+    #[test]
+    fn test_prefix_free() {
+        info!("Test prefix free encoding of integers");
+        for i in 0..18 {
+            let pf = PrefixFree(i);
+            let bigger = i + 1;
+            let bit_length = pf.length();
+            info!("Prefix-free: {i} -> {bigger} -> {pf:?} ({bit_length})")
         }
     }
 }
