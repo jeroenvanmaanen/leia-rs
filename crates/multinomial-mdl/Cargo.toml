@@ -1,0 +1,27 @@
+[package]
+name = "multinomial-mdl"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+description.workspace = true
+
+[lib]
+name = "multinomial_mdl"
+path = "src/lib/mod.rs"
+
+[[bin]]
+name = "multinomial-mdl"
+path = "src/bin/main.rs"
+
+[dependencies]
+
+anyhow.workspace = true
+clap = { workspace = true, features = ["derive"] }
+env_logger.workspace = true
+log.workspace = true
+rand.workspace = true
+rational.workspace = true
+
+[dev-dependencies]
+
+test-log.workspace = true
