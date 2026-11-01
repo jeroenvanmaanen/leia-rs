@@ -24,7 +24,7 @@ struct Threshold {
     count_b: u64,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 struct IntervalSpec {
     bound: Rational,
     count: u64,
@@ -65,17 +65,12 @@ fn update_rationals(previous_weight: u64, previous_rationals: Rationals, w: u64)
             let mut previous = (Rational::zero(), Rational::zero());
             let mut mapped_intervals = vec![];
             for b in &mapped {
-                mapped_intervals.push((previous, b));
+                mapped_intervals.push((previous, *b));
                 previous = *b;
             }
             let mut it = mapped_intervals.iter();
-            let first = it.next().unwrap();
-            let first_mapped = MappedInterval {
-                ma: first.0.0,
-                a: first.0.1,
-                mb: first.1.0,
-                b: first.1.1,
-            };
+            let ((ma, a), (mb, b)) = *(it.next().unwrap());
+            let first_mapped = MappedInterval { ma, a, mb, b };
             let max_mapped = it.fold(first_mapped, max_mapped_interval);
             let scaled = scale_interval(Rational::new(1, 3), (max_mapped.a, max_mapped.b));
             let continued_fraction = continued_fraction_expand_r(scaled.0, scaled.1, false, false);
@@ -99,6 +94,7 @@ fn map_to_thresholds(
         let x = *x;
         if x > threshold.bound_b {
             threshold = it.next().unwrap();
+            continue;
         } else if x > threshold.bound_a {
             let width = threshold.bound_b - threshold.bound_a;
             let count = threshold.count_b - threshold.count_a;
@@ -113,7 +109,7 @@ fn map_to_thresholds(
 
 fn max_mapped_interval(
     current: MappedInterval,
-    next_mapped: &((Rational, Rational), &(Rational, Rational)),
+    next_mapped: &((Rational, Rational), (Rational, Rational)),
 ) -> MappedInterval {
     let MappedInterval { ma, mb, .. } = current;
     let ((mc, c), (md, d)) = next_mapped;
@@ -138,33 +134,37 @@ fn scale_interval(r: Rational, interval: (Rational, Rational)) -> (Rational, Rat
     (aa, bb)
 }
 
-fn get_thresholds(w: u64) -> Vec<Threshold> {
-    if w < 4 {
+fn get_thresholds(weight: u64) -> Vec<Threshold> {
+    if weight < 4 {
         let threshold = Threshold {
             bound_a: Rational::zero(),
             bound_b: Rational::one(),
             count_a: 0,
-            count_b: w,
+            count_b: weight,
         };
         vec![threshold]
     } else {
-        let square_root = (w as f64).sqrt();
-        let hyper_root = square_root.sqrt();
-        let intervals = max(1, square_root.floor() as u64);
-        let spacing = Rational::new(w, intervals);
-        let mut boundaries = vec![];
-        let mut b = Rational::zero();
-        while b < w {
-            boundaries.push(b);
-            b += spacing;
-        }
-        let interval_specs: Vec<IntervalSpec> = boundaries
-            .into_iter()
-            .map(|b| get_interval_spec(w, spacing, square_root, hyper_root, b))
-            .collect();
+        let interval_specs = get_interval_specs(weight);
         let summed = interval_specs.iter().fold(vec![], sum_interval_specs);
         summed.iter().fold(vec![], combine_interval_specs)
     }
+}
+
+fn get_interval_specs(weight: u64) -> Vec<IntervalSpec> {
+    let square_root = (weight as f64).sqrt();
+    let hyper_root = square_root.sqrt();
+    let intervals = max(1, square_root.floor() as u64);
+    let spacing = Rational::new(weight, intervals);
+    let mut boundaries = vec![];
+    let mut b = Rational::zero();
+    while b < weight {
+        boundaries.push(b);
+        b += spacing;
+    }
+    boundaries
+        .into_iter()
+        .map(|b| get_interval_spec(weight, spacing, square_root, hyper_root, b))
+        .collect()
 }
 
 fn get_interval_spec(
@@ -379,7 +379,8 @@ mod test {
         info!("");
     }
 
-    const TEST_WEIGHTS: &[u64] = &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 100, 1000];
+    const TEST_WEIGHTS: &[u64] = &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 48, 100, 1000];
+    // const TEST_WEIGHTS: &[u64] = &[48];
 
     #[test]
     fn test_weights() {
@@ -390,10 +391,11 @@ mod test {
 
     fn test_get_rationals(weight: u64) {
         let rationals = get_rationals(weight);
-        info!("Rationals for weight: {weight}");
+        info!("Rationals for weight: {weight}: [");
         for (w, r) in rationals.segments {
             info!("  ({w}, {r})");
         }
+        info!("]");
         info!("");
     }
 
@@ -401,6 +403,30 @@ mod test {
     fn test_get_rationals_for_weights() {
         for weight in TEST_WEIGHTS {
             test_get_rationals(*weight);
+        }
+    }
+
+    fn test_get_interval_specs(weight: u64) {
+        let interval_specs = get_interval_specs(weight);
+        info!("Interval specifications for {weight}: [");
+        for spec in &interval_specs {
+            info!("  {spec:?}");
+        }
+        info!("]");
+        info!("");
+        let summed = interval_specs.iter().fold(vec![], sum_interval_specs);
+        info!("Summed interval specifications for {weight}: [");
+        for spec in summed {
+            info!("  {spec:?}");
+        }
+        info!("]");
+        info!("");
+    }
+
+    #[test]
+    fn get_interval_specs_for_weights() {
+        for weight in TEST_WEIGHTS {
+            test_get_interval_specs(*weight);
         }
     }
 }
