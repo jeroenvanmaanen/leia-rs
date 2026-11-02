@@ -8,6 +8,7 @@ use rational::Rational;
 use regex::Regex;
 
 use crate::MaximumLikelihood;
+use crate::implementation::Decision::{SPLIT, UNIFORM};
 use crate::implementation::MultinomialModel::Split;
 use crate::implementation::MultinomialModel::Uniform;
 
@@ -202,6 +203,7 @@ impl Debug for MultinomialModel {
 }
 
 /// p = n / (n + w) \in [0, 1]
+#[derive(Clone, Copy)]
 struct Probability {
     numerator: PrefixFree,
     weight: PrefixFree,
@@ -237,6 +239,7 @@ impl Debug for Probability {
     }
 }
 
+#[derive(Clone, Copy)]
 struct PrefixFree(u64);
 
 impl PrefixFree {
@@ -501,7 +504,7 @@ pub fn new_counts(counts: Vec<u64>) -> impl CountsTrait {
 }
 
 impl Counts {
-    fn encode_private(&self) -> MultinomialModel {
+    fn encode_private<S: ModelingStrategy>(&self, strategy: &S) -> MultinomialModel {
         trace!("Encode(*): [{self:?}]");
         if self.counts.is_empty() {
             return MultinomialModel::Uniform(0);
@@ -550,14 +553,35 @@ impl Counts {
             count: self.counts.len() as u8,
             bits,
         };
-        let p = Probability::new(probable_weight, improbable_weight);
-        let probable_distribution = Counts::new(probable);
-        let improbable_distribution = Counts::new(improbable);
+        let early = strategy.decide_early(probable_weight, improbable_weight);
+        let mut p = Probability::new(1, 1);
+        match &early {
+            Some(UNIFORM) => {
+                return MultinomialModel::Uniform(self.len());
+            }
+            Some(SPLIT(probability)) => p = *probability,
+            None => (),
+        };
+        let probable_counts = Counts::new(probable);
+        let improbable_counts = Counts::new(improbable);
+        let probable_model = probable_counts.encode_private(strategy);
+        let improbable_model = improbable_counts.encode_private(strategy);
+        if early.is_none() {
+            p = match strategy.decide_late(
+                &probable_model,
+                &probable_counts,
+                &improbable_model,
+                &improbable_counts,
+            ) {
+                UNIFORM => return MultinomialModel::Uniform(self.len()),
+                SPLIT(p) => p,
+            };
+        }
         MultinomialModel::Split {
             p,
             split,
-            probable: Box::new(probable_distribution.encode_private()),
-            improbable: Box::new(improbable_distribution.encode_private()),
+            probable: Box::new(probable_model),
+            improbable: Box::new(improbable_model),
         }
     }
 }
@@ -582,7 +606,7 @@ impl CountsTrait for Counts {
 
 impl MaximumLikelihood for Counts {
     fn maximum_likelihood_model(&self) -> impl MultinomialModelTrait {
-        let result = self.encode_private();
+        let result = self.encode_private(&MAXIMUM_LIKELIHOOD_STRATEGY);
         info!("Encoded distribution {result:?} {{");
         let mut total = Rational::zero();
         for i in 1..=result.len() {
@@ -600,6 +624,36 @@ impl MaximumLikelihood for Counts {
             total.denominator()
         );
         result
+    }
+}
+
+enum Decision {
+    UNIFORM,
+    SPLIT(Probability),
+}
+
+trait ModelingStrategy {
+    fn decide_early(&self, _probable: u64, _improbable: u64) -> Option<Decision> {
+        None
+    }
+    fn decide_late<M: MultinomialModelTrait, C: CountsTrait>(
+        &self,
+        _probable: &M,
+        _probable_counts: &C,
+        _improbable: &M,
+        _improbable_counts: &C,
+    ) -> Decision {
+        UNIFORM
+    }
+}
+
+struct MaximumLikelihoodStrategy {}
+
+const MAXIMUM_LIKELIHOOD_STRATEGY: MaximumLikelihoodStrategy = MaximumLikelihoodStrategy {};
+
+impl ModelingStrategy for MaximumLikelihoodStrategy {
+    fn decide_early(&self, probable: u64, improbable: u64) -> Option<Decision> {
+        Some(SPLIT(Probability::new(probable, improbable)))
     }
 }
 
