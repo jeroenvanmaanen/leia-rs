@@ -3,7 +3,7 @@ use std::env;
 use anyhow::Result;
 use clap::Parser;
 use log::info;
-use multinomial_mdl::{Distribution, new_distribution};
+use multinomial_mdl::{Counts, new_distribution};
 
 use crate::Command::ENCODE;
 

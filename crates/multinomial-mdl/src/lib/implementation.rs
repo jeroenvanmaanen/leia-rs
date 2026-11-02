@@ -3,26 +3,28 @@ use std::fmt::{Debug, Formatter};
 use std::sync::LazyLock;
 
 use anyhow::{Result, anyhow};
-use log::{info, trace};
+use log::{error, info, trace};
+use rational::Rational;
 use regex::Regex;
 
-use crate::implementation::DistributionDescription::Split;
-use crate::implementation::DistributionDescription::Uniform;
+use crate::implementation::MultinomialModel::Split;
+use crate::implementation::MultinomialModel::Uniform;
 
+use super::Counts as CountsTrait;
 use super::Description;
-use super::Distribution as DistributionTrait;
+use super::MultinomialModel as MultinomialModelTrait;
 
-enum DistributionDescription {
+enum MultinomialModel {
     Uniform(usize),
     Split {
         p: Probability,
         split: BitString,
-        probable: Box<DistributionDescription>,
-        improbable: Box<DistributionDescription>,
+        probable: Box<MultinomialModel>,
+        improbable: Box<MultinomialModel>,
     },
 }
 
-impl DistributionDescription {
+impl MultinomialModel {
     fn evaluate(&self, distribution: &Distribution, fraction: f64) -> Result<f64> {
         if fraction < 0.0 || fraction > 1.0 {
             return Err(anyhow!("Invalid fraction: [{fraction}]"));
@@ -84,7 +86,7 @@ impl DistributionDescription {
     }
 }
 
-impl Description for DistributionDescription {
+impl Description for MultinomialModel {
     fn bits(&self) -> impl Iterator<Item = bool> {
         match self {
             Uniform(m) if *m < 2 => {
@@ -110,7 +112,64 @@ impl Description for DistributionDescription {
     }
 }
 
-impl Debug for DistributionDescription {
+impl MultinomialModelTrait for MultinomialModel {
+    fn len(&self) -> usize {
+        match self {
+            Uniform(m) => *m as usize,
+            Split { split, .. } => split.count as usize,
+        }
+    }
+
+    fn probability(&self, i: usize) -> Result<Rational> {
+        match self {
+            Uniform(m) => {
+                if i != 0 && i <= *m {
+                    Ok(Rational::new(1, *m as u64))
+                } else {
+                    Err(anyhow!("Invalid index in uniform: {i}"))
+                }
+            }
+            Split {
+                p,
+                split,
+                probable,
+                improbable,
+            } => {
+                if self.len() <= 1 {
+                    return Ok(Rational::one());
+                }
+                let is_probable = split.bit(i)?;
+                let side = if is_probable { probable } else { improbable };
+                let side_p = if side.len() > 1 {
+                    let mut side_bits = *split;
+                    if !is_probable {
+                        side_bits.invert();
+                    }
+                    let mut it = side_bits.bits();
+                    let mut k = 1;
+                    for _ in 1..i {
+                        if let Some(b) = it.next() {
+                            if b {
+                                k += 1;
+                            }
+                        } else {
+                            return Err(anyhow!("Invalid index in split: {i}"));
+                        }
+                    }
+                    side.probability(k)?
+                } else {
+                    Rational::one()
+                };
+                let n = p.numerator.0;
+                let w = p.weight.0;
+                let nn = if is_probable { n } else { w };
+                Ok(Rational::new(nn, n + w) * side_p)
+            }
+        }
+    }
+}
+
+impl Debug for MultinomialModel {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Uniform(m) if *m < 2 => {
@@ -288,6 +347,15 @@ impl BitString {
     fn new(bits: u128, count: u8) -> BitString {
         BitString { bits, count }
     }
+    fn bit(&self, i: usize) -> Result<bool> {
+        trace!("Index: {i}");
+        if i != 0 && i <= self.count as usize {
+            let pos = self.count as usize - i;
+            Ok(((1 << pos) & self.bits) != 0)
+        } else {
+            Err(anyhow!("Invalid index in bit-string: {i}"))
+        }
+    }
 }
 
 struct BitIterator {
@@ -321,6 +389,9 @@ impl BitString {
         } else {
             BitIterator::new(self.bits, 1 << (self.count - 1))
         }
+    }
+    fn invert(&mut self) {
+        self.bits ^= u128::MAX;
     }
 }
 
@@ -420,15 +491,15 @@ struct Sorted {
     mapping: BTreeSet<Pair>,
 }
 
-pub fn new_distribution(counts: Vec<u64>) -> impl DistributionTrait {
+pub fn new_distribution(counts: Vec<u64>) -> impl CountsTrait {
     Distribution { counts }
 }
 
 impl Distribution {
-    fn encode_private(&self) -> DistributionDescription {
+    fn encode_private(&self) -> MultinomialModel {
         trace!("Encode(*): [{self:?}]");
         if self.counts.is_empty() {
-            return DistributionDescription::Uniform(0);
+            return MultinomialModel::Uniform(0);
         }
         let mut sorted = Sorted {
             mapping: BTreeSet::new(),
@@ -477,7 +548,7 @@ impl Distribution {
         let p = Probability::new(probable_weight, improbable_weight);
         let probable_distribution = Distribution::new(probable);
         let improbable_distribution = Distribution::new(improbable);
-        DistributionDescription::Split {
+        MultinomialModel::Split {
             p,
             split,
             probable: Box::new(probable_distribution.encode_private()),
@@ -486,11 +557,26 @@ impl Distribution {
     }
 }
 
-impl DistributionTrait for Distribution {
-    fn encode(&self) -> impl Description {
+impl CountsTrait for Distribution {
+    fn encode(&self) -> impl MultinomialModelTrait {
         let result = self.encode_private();
         let description_length = result.evaluate(self, 1.0).ok();
-        info!("Encoded distribution {result:?} (DL: {description_length:?})");
+        info!("Encoded distribution {result:?} (DL: {description_length:?}) {{");
+        let mut total = Rational::zero();
+        for i in 1..=result.len() {
+            match result.probability(i) {
+                Ok(p) => {
+                    total += p;
+                    info!("  P[X={i}] = {} / {}", p.numerator(), p.denominator());
+                }
+                Err(e) => error!("Error: {i}: {e}"),
+            }
+        }
+        info!(
+            "}} (total: {} / {})",
+            total.numerator(),
+            total.denominator()
+        );
         result
     }
 }
