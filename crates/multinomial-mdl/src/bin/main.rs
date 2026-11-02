@@ -3,7 +3,7 @@ use std::env;
 use anyhow::Result;
 use clap::Parser;
 use log::info;
-use multinomial_mdl::{Counts, new_distribution};
+use multinomial_mdl::{Counts, MultinomialModel, new_counts};
 
 use crate::Command::ENCODE;
 
@@ -27,10 +27,15 @@ Multinomial MDL
 
     info!("Multinomial MDL");
     match command {
-        ENCODE { counts, .. } => {
-            let distribution = new_distribution(counts);
-            let encoded = distribution.encode();
-            info!("Encoded: [{encoded:?}]");
+        ENCODE {
+            counts: count_values,
+            ..
+        } => {
+            let counts = new_counts(count_values);
+            let model = counts.encode();
+            info!("Model: [{model:?}]");
+            let description_length = model.evaluate(&counts)?;
+            info!("Description length of model plus data given model = {description_length}");
         }
     }
     Ok(())

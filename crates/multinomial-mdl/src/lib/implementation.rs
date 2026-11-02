@@ -25,11 +25,11 @@ enum MultinomialModel {
 }
 
 impl MultinomialModel {
-    fn evaluate(&self, distribution: &Distribution, fraction: f64) -> Result<f64> {
+    fn evaluate<C: CountsTrait>(&self, distribution: &C, fraction: f64) -> Result<f64> {
         if fraction < 0.0 || fraction > 1.0 {
             return Err(anyhow!("Invalid fraction: [{fraction}]"));
         }
-        let dm = distribution.counts.len();
+        let dm = distribution.len();
         match self {
             Uniform(m) => {
                 if *m != dm {
@@ -41,11 +41,11 @@ impl MultinomialModel {
                 }
                 if dm == 1 {
                     let avg_length = fraction.log2();
-                    return Ok(distribution.counts[0] as f64 * avg_length);
+                    return Ok(distribution.get(0)? as f64 * avg_length);
                 }
                 let p = fraction / (dm as f64);
                 let avg_length = p.log2();
-                let n: u64 = distribution.counts.iter().sum();
+                let n: u64 = distribution.iter().sum();
                 let model_length = 1.0;
                 Ok(model_length + (n as f64) * avg_length)
             }
@@ -64,15 +64,15 @@ impl MultinomialModel {
                 let p = fraction * numerator / denominator;
                 let mut probable_counts = vec![];
                 let mut improbable_counts = vec![];
-                for (b, c) in split.bits().zip(distribution.counts.iter()) {
+                for (b, c) in split.bits().zip(distribution.iter()) {
                     if b {
-                        probable_counts.push(*c);
+                        probable_counts.push(c);
                     } else {
-                        improbable_counts.push(*c);
+                        improbable_counts.push(c);
                     }
                 }
-                let probable_distribution = Distribution::new(probable_counts);
-                let improbable_distribution = Distribution::new(improbable_counts);
+                let probable_distribution = Counts::new(probable_counts);
+                let improbable_distribution = Counts::new(improbable_counts);
                 trace!(
                     "Evaluate split: {probability:?} {probable_distribution:?} {improbable_distribution:?}"
                 );
@@ -166,6 +166,10 @@ impl MultinomialModelTrait for MultinomialModel {
                 Ok(Rational::new(nn, n + w) * side_p)
             }
         }
+    }
+
+    fn evaluate<C: CountsTrait>(&self, counts: &C) -> Result<f64> {
+        self.evaluate(counts, 1.0)
     }
 }
 
@@ -417,17 +421,17 @@ fn to_binary_digit(b: bool) -> &'static str {
     if b { "1" } else { "0" }
 }
 
-struct Distribution {
+struct Counts {
     counts: Vec<u64>,
 }
 
-impl Distribution {
-    fn new(counts: Vec<u64>) -> Distribution {
-        Distribution { counts }
+impl Counts {
+    fn new(counts: Vec<u64>) -> Counts {
+        Counts { counts }
     }
 }
 
-impl Debug for Distribution {
+impl Debug for Counts {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         f.write_str("[#")?;
         for c in &self.counts {
@@ -491,11 +495,11 @@ struct Sorted {
     mapping: BTreeSet<Pair>,
 }
 
-pub fn new_distribution(counts: Vec<u64>) -> impl CountsTrait {
-    Distribution { counts }
+pub fn new_counts(counts: Vec<u64>) -> impl CountsTrait {
+    Counts { counts }
 }
 
-impl Distribution {
+impl Counts {
     fn encode_private(&self) -> MultinomialModel {
         trace!("Encode(*): [{self:?}]");
         if self.counts.is_empty() {
@@ -546,8 +550,8 @@ impl Distribution {
             bits,
         };
         let p = Probability::new(probable_weight, improbable_weight);
-        let probable_distribution = Distribution::new(probable);
-        let improbable_distribution = Distribution::new(improbable);
+        let probable_distribution = Counts::new(probable);
+        let improbable_distribution = Counts::new(improbable);
         MultinomialModel::Split {
             p,
             split,
@@ -557,11 +561,10 @@ impl Distribution {
     }
 }
 
-impl CountsTrait for Distribution {
+impl CountsTrait for Counts {
     fn encode(&self) -> impl MultinomialModelTrait {
         let result = self.encode_private();
-        let description_length = result.evaluate(self, 1.0).ok();
-        info!("Encoded distribution {result:?} (DL: {description_length:?}) {{");
+        info!("Encoded distribution {result:?} {{");
         let mut total = Rational::zero();
         for i in 1..=result.len() {
             match result.probability(i) {
@@ -578,6 +581,18 @@ impl CountsTrait for Distribution {
             total.denominator()
         );
         result
+    }
+
+    fn len(&self) -> usize {
+        self.counts.len()
+    }
+
+    fn get(&self, i: usize) -> Result<u64> {
+        self.counts.get(i).map(|c| *c).ok_or(anyhow!(""))
+    }
+
+    fn iter(&self) -> impl Iterator<Item = u64> {
+        self.counts.iter().map(|c| *c)
     }
 }
 
