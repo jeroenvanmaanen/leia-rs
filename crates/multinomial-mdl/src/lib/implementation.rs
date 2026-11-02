@@ -7,6 +7,7 @@ use log::{error, info, trace};
 use rational::Rational;
 use regex::Regex;
 
+use crate::MaximumLikelihood;
 use crate::implementation::MultinomialModel::Split;
 use crate::implementation::MultinomialModel::Uniform;
 
@@ -562,7 +563,25 @@ impl Counts {
 }
 
 impl CountsTrait for Counts {
-    fn encode(&self) -> impl MultinomialModelTrait {
+    fn len(&self) -> usize {
+        self.counts.len()
+    }
+
+    fn get(&self, i: usize) -> Result<u64> {
+        self.counts.get(i).map(|c| *c).ok_or(anyhow!(""))
+    }
+
+    fn iter(&self) -> impl Iterator<Item = u64> {
+        self.counts.iter().map(|c| *c)
+    }
+
+    fn as_maximum_likelihood(&self) -> Option<&impl MaximumLikelihood> {
+        Some(self)
+    }
+}
+
+impl MaximumLikelihood for Counts {
+    fn maximum_likelihood_model(&self) -> impl MultinomialModelTrait {
         let result = self.encode_private();
         info!("Encoded distribution {result:?} {{");
         let mut total = Rational::zero();
@@ -581,18 +600,6 @@ impl CountsTrait for Counts {
             total.denominator()
         );
         result
-    }
-
-    fn len(&self) -> usize {
-        self.counts.len()
-    }
-
-    fn get(&self, i: usize) -> Result<u64> {
-        self.counts.get(i).map(|c| *c).ok_or(anyhow!(""))
-    }
-
-    fn iter(&self) -> impl Iterator<Item = u64> {
-        self.counts.iter().map(|c| *c)
     }
 }
 
