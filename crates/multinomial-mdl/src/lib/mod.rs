@@ -22,7 +22,7 @@ pub trait Counts: Debug {
     fn as_maximum_likelihood(&self) -> Option<&impl MaximumLikelihood> {
         None::<&NotSupported>
     }
-    fn as_minimum_description_length(&self) -> Option<&impl MaximumLikelihood> {
+    fn as_minimum_description_length(&self) -> Option<&impl MinimumDescriptionLength> {
         None::<&NotSupported>
     }
 }
@@ -31,6 +31,8 @@ pub trait MultinomialModel: Description {
     fn len(&self) -> usize;
     fn probability(&self, i: usize) -> Result<Rational>;
     fn evaluate<C: Counts>(&self, counts: &C) -> Result<f64>;
+    fn length_of_model(&self) -> u64;
+    fn length_of_data_given_model<C: Counts>(&self, counts: &C) -> Result<f64>;
 }
 
 pub trait MaximumLikelihood: Counts {

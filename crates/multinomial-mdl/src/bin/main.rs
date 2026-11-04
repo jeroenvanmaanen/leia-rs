@@ -3,7 +3,9 @@ use std::env;
 use anyhow::Result;
 use clap::Parser;
 use log::info;
-use multinomial_mdl::{Counts, MaximumLikelihood, MultinomialModel, new_counts};
+use multinomial_mdl::{
+    Counts, MaximumLikelihood, MinimumDescriptionLength, MultinomialModel, new_counts,
+};
 
 use crate::Command::ENCODE;
 
@@ -23,9 +25,8 @@ Multinomial MDL
 "
     );
     let command = Command::parse_from(env::args());
-    println!("Command: [{command:?}]");
+    info!("Command: [{command:?}]");
 
-    info!("Multinomial MDL");
     match command {
         ENCODE {
             counts: count_values,
@@ -34,6 +35,12 @@ Multinomial MDL
             let counts = new_counts(count_values);
             if let Some(ml) = counts.as_maximum_likelihood() {
                 let model = ml.maximum_likelihood_model();
+                info!("Model: [{model:?}]");
+                let description_length = model.evaluate(&counts)?;
+                info!("Description length of model plus data given model = {description_length}");
+            }
+            if let Some(mdl) = counts.as_minimum_description_length() {
+                let model = mdl.minimum_description_length_model();
                 info!("Model: [{model:?}]");
                 let description_length = model.evaluate(&counts)?;
                 info!("Description length of model plus data given model = {description_length}");

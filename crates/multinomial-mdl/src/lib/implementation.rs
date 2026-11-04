@@ -7,18 +7,22 @@ use log::{error, info, trace};
 use rational::Rational;
 use regex::Regex;
 
-use crate::MaximumLikelihood;
 use crate::implementation::Decision::{SPLIT, UNIFORM};
 use crate::implementation::MultinomialModel::Split;
 use crate::implementation::MultinomialModel::Uniform;
+use crate::{MaximumLikelihood, MinimumDescriptionLength};
 
 use super::Counts as CountsTrait;
 use super::Description;
 use super::MultinomialModel as MultinomialModelTrait;
 
 enum MultinomialModel {
-    Uniform(usize),
+    Uniform {
+        fraction: f64,
+        dimension: usize,
+    },
     Split {
+        fraction: f64,
         p: Probability,
         split: BitString,
         probable: Box<MultinomialModel>,
@@ -27,63 +31,10 @@ enum MultinomialModel {
 }
 
 impl MultinomialModel {
-    fn evaluate<C: CountsTrait>(&self, distribution: &C, fraction: f64) -> Result<f64> {
-        if fraction < 0.0 || fraction > 1.0 {
-            return Err(anyhow!("Invalid fraction: [{fraction}]"));
-        }
-        let dm = distribution.len();
+    fn fraction(&self) -> f64 {
         match self {
-            Uniform(m) => {
-                if *m != dm {
-                    return Err(anyhow!("Mismatch: [{m}] != [{dm}]"));
-                }
-                trace!("Evaluate uniform: {distribution:?}");
-                if dm == 0 {
-                    return Ok(0.0);
-                }
-                if dm == 1 {
-                    let avg_length = fraction.log2();
-                    return Ok(distribution.get(0)? as f64 * avg_length);
-                }
-                let p = fraction / (dm as f64);
-                let avg_length = p.log2();
-                let n: u64 = distribution.iter().sum();
-                let model_length = 1.0;
-                Ok(model_length + (n as f64) * avg_length)
-            }
-            Split {
-                p: probability,
-                split,
-                probable,
-                improbable,
-            } => {
-                let m = split.length() as usize;
-                if m != dm {
-                    return Err(anyhow!("Mismatch: [{m}] != [{dm}]"));
-                }
-                let numerator = probability.numerator.0 as f64;
-                let denominator = (probability.numerator.0 + probability.weight.0) as f64;
-                let p = fraction * numerator / denominator;
-                let mut probable_counts = vec![];
-                let mut improbable_counts = vec![];
-                for (b, c) in split.bits().zip(distribution.iter()) {
-                    if b {
-                        probable_counts.push(c);
-                    } else {
-                        improbable_counts.push(c);
-                    }
-                }
-                let probable_distribution = Counts::new(probable_counts);
-                let improbable_distribution = Counts::new(improbable_counts);
-                trace!(
-                    "Evaluate split: {probability:?} {probable_distribution:?} {improbable_distribution:?}"
-                );
-                let probable_length = probable.evaluate(&probable_distribution, p)?;
-                let improbable_length = improbable.evaluate(&improbable_distribution, 1.0 - p)?;
-
-                let model_length = 1 + probability.length() + split.length();
-                Ok((model_length as f64) + probable_length + improbable_length)
-            }
+            Uniform { fraction, .. } => *fraction,
+            Split { fraction, .. } => *fraction,
         }
     }
 }
@@ -91,11 +42,11 @@ impl MultinomialModel {
 impl Description for MultinomialModel {
     fn bits(&self) -> impl Iterator<Item = bool> {
         match self {
-            Uniform(m) if *m < 2 => {
+            Uniform { dimension, .. } if *dimension < 2 => {
                 let empty = vec![];
                 bit_vec_bits(&empty)
             }
-            Uniform(_) => {
+            Uniform { .. } => {
                 let single = vec![BitString::new(0, 1)];
                 bit_vec_bits(&single)
             }
@@ -104,29 +55,40 @@ impl Description for MultinomialModel {
                 result.push(BitString::new(1, 1));
                 result.push(split.clone());
 
-                bit_vec_bits(&result)
+                bit_vec_bits(&result);
+                todo!("Add bits for probable and improbable")
             }
         }
     }
 
     fn length(&self) -> u64 {
-        todo!()
+        match self {
+            Uniform { dimension, .. } if *dimension < 2 => 0,
+            Uniform { .. } => 1,
+            Split {
+                split,
+                p,
+                probable,
+                improbable,
+                ..
+            } => 1 + split.length() + p.length() + probable.length() + improbable.length(),
+        }
     }
 }
 
 impl MultinomialModelTrait for MultinomialModel {
     fn len(&self) -> usize {
         match self {
-            Uniform(m) => *m as usize,
+            Uniform { dimension, .. } => *dimension as usize,
             Split { split, .. } => split.count as usize,
         }
     }
 
     fn probability(&self, i: usize) -> Result<Rational> {
         match self {
-            Uniform(m) => {
-                if i != 0 && i <= *m {
-                    Ok(Rational::new(1, *m as u64))
+            Uniform { dimension, .. } => {
+                if i != 0 && i <= *dimension {
+                    Ok(Rational::new(1, *dimension as u64))
                 } else {
                     Err(anyhow!("Invalid index in uniform: {i}"))
                 }
@@ -136,6 +98,7 @@ impl MultinomialModelTrait for MultinomialModel {
                 split,
                 probable,
                 improbable,
+                ..
             } => {
                 if self.len() <= 1 {
                     return Ok(Rational::one());
@@ -171,19 +134,60 @@ impl MultinomialModelTrait for MultinomialModel {
     }
 
     fn evaluate<C: CountsTrait>(&self, counts: &C) -> Result<f64> {
-        self.evaluate(counts, 1.0)
+        let model = self.length_of_model() as f64;
+        let data = self.length_of_data_given_model(counts)?;
+        Ok(model + data)
+    }
+
+    fn length_of_model(&self) -> u64 {
+        match self {
+            Uniform { dimension, .. } => {
+                if *dimension == 0 {
+                    return 0;
+                } else {
+                    return 1;
+                }
+            }
+            Split {
+                p,
+                split,
+                probable,
+                improbable,
+                ..
+            } => {
+                let probable_model_length = probable.length_of_model();
+                let improbable_model_length = improbable.length_of_model();
+                let model_length = 1
+                    + p.length()
+                    + split.length()
+                    + probable_model_length
+                    + improbable_model_length;
+                model_length
+            }
+        }
+    }
+
+    fn length_of_data_given_model<C: CountsTrait>(&self, counts: &C) -> Result<f64> {
+        let fraction = self.fraction();
+        let mut result = 0.0;
+        for (i, c) in (1..=counts.len()).zip(counts.iter()) {
+            let pi = self.probability(i)?.decimal_value() * fraction;
+            let item_length = -pi.log2();
+            result += c as f64 * item_length;
+        }
+        Ok(result)
     }
 }
 
 impl Debug for MultinomialModel {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Uniform(m) if *m < 2 => {
-                f.debug_tuple("Uniform").field(m).finish()?;
+            Self::Uniform { dimension, .. } if *dimension < 2 => {
+                f.debug_tuple("Uniform").field(dimension).finish()?;
                 f.write_str(" ''")
             }
-            Self::Uniform(m) => {
-                f.debug_tuple("Uniform").field(m).finish()?;
+            Self::Uniform { dimension, .. } => {
+                f.debug_tuple("Uniform").field(dimension).finish()?;
                 f.write_str(" '0'")
             }
             Self::Split {
@@ -191,6 +195,7 @@ impl Debug for MultinomialModel {
                 split,
                 probable,
                 improbable,
+                ..
             } => {
                 f.write_str("Split['1 ")?;
                 f.write_fmt(format_args!("s={:?}", split))?;
@@ -504,10 +509,13 @@ pub fn new_counts(counts: Vec<u64>) -> impl CountsTrait {
 }
 
 impl Counts {
-    fn encode_private<S: ModelingStrategy>(&self, strategy: &S) -> MultinomialModel {
+    fn encode_private<S: ModelingStrategy>(&self, strategy: &S, fraction: f64) -> MultinomialModel {
         trace!("Encode(*): [{self:?}]");
         if self.counts.is_empty() {
-            return MultinomialModel::Uniform(0);
+            return MultinomialModel::Uniform {
+                fraction,
+                dimension: 0,
+            };
         }
         let mut sorted = Sorted {
             mapping: BTreeSet::new(),
@@ -531,7 +539,10 @@ impl Counts {
             }
         }
         if max == 0 {
-            return Uniform(self.counts.len());
+            return Uniform {
+                fraction,
+                dimension: self.counts.len(),
+            };
         }
         let mut probable = vec![];
         let mut improbable = vec![];
@@ -554,30 +565,51 @@ impl Counts {
             bits,
         };
         let early = strategy.decide_early(probable_weight, improbable_weight);
-        let mut p = Probability::new(1, 1);
+        let mut p = Probability::new(probable_weight, improbable_weight);
         match &early {
             Some(UNIFORM) => {
-                return MultinomialModel::Uniform(self.len());
+                return MultinomialModel::Uniform {
+                    fraction,
+                    dimension: self.len(),
+                };
             }
             Some(SPLIT(probability)) => p = *probability,
             None => (),
         };
+
+        let pn = p.numerator.0;
+        let pd = pn + p.weight.0;
+        let pr = Rational::new(pn, pd).decimal_value();
+
         let probable_counts = Counts::new(probable);
         let improbable_counts = Counts::new(improbable);
-        let probable_model = probable_counts.encode_private(strategy);
-        let improbable_model = improbable_counts.encode_private(strategy);
+        let probable_model = probable_counts.encode_private(strategy, fraction * pr);
+        let improbable_model = improbable_counts.encode_private(strategy, fraction * (1.0 - pr));
         if early.is_none() {
-            p = match strategy.decide_late(
-                &probable_model,
-                &probable_counts,
-                &improbable_model,
-                &improbable_counts,
-            ) {
-                UNIFORM => return MultinomialModel::Uniform(self.len()),
+            p = match strategy
+                .decide_late(
+                    fraction,
+                    &probable_model,
+                    &probable_counts,
+                    &improbable_model,
+                    &improbable_counts,
+                )
+                .inspect_err(|e| error!("Error in decide_late: [{e:?}]"))
+                .unwrap_or(UNIFORM)
+            {
+                UNIFORM => {
+                    return MultinomialModel::Uniform {
+                        fraction,
+                        dimension: self.len(),
+                    };
+                }
                 SPLIT(p) => p,
             };
         }
+        let gcd = num::integer::gcd(p.numerator.0, p.weight.0);
+        let p = Probability::new(p.numerator.0 / gcd, p.weight.0 / gcd);
         MultinomialModel::Split {
+            fraction,
             p,
             split,
             probable: Box::new(probable_model),
@@ -602,11 +634,38 @@ impl CountsTrait for Counts {
     fn as_maximum_likelihood(&self) -> Option<&impl MaximumLikelihood> {
         Some(self)
     }
+
+    fn as_minimum_description_length(&self) -> Option<&impl MinimumDescriptionLength> {
+        Some(self)
+    }
 }
 
 impl MaximumLikelihood for Counts {
     fn maximum_likelihood_model(&self) -> impl MultinomialModelTrait {
-        let result = self.encode_private(&MAXIMUM_LIKELIHOOD_STRATEGY);
+        let result = self.encode_private(&MAXIMUM_LIKELIHOOD_STRATEGY, 1.0);
+        info!("Encoded distribution {result:?} {{");
+        let mut total = Rational::zero();
+        for i in 1..=result.len() {
+            match result.probability(i) {
+                Ok(p) => {
+                    total += p;
+                    info!("  P[X={i}] = {} / {}", p.numerator(), p.denominator());
+                }
+                Err(e) => error!("Error: {i}: {e}"),
+            }
+        }
+        info!(
+            "}} (total: {} / {})",
+            total.numerator(),
+            total.denominator()
+        );
+        result
+    }
+}
+
+impl MinimumDescriptionLength for Counts {
+    fn minimum_description_length_model(&self) -> impl MultinomialModelTrait {
+        let result = self.encode_private(&MINIMUM_DESCRIPTION_LENGTH_STRATEGY, 1.0);
         info!("Encoded distribution {result:?} {{");
         let mut total = Rational::zero();
         for i in 1..=result.len() {
@@ -638,12 +697,13 @@ trait ModelingStrategy {
     }
     fn decide_late<M: MultinomialModelTrait, C: CountsTrait>(
         &self,
+        _fraction: f64,
         _probable: &M,
         _probable_counts: &C,
         _improbable: &M,
         _improbable_counts: &C,
-    ) -> Decision {
-        UNIFORM
+    ) -> Result<Decision> {
+        Ok(UNIFORM)
     }
 }
 
@@ -654,6 +714,51 @@ const MAXIMUM_LIKELIHOOD_STRATEGY: MaximumLikelihoodStrategy = MaximumLikelihood
 impl ModelingStrategy for MaximumLikelihoodStrategy {
     fn decide_early(&self, probable: u64, improbable: u64) -> Option<Decision> {
         Some(SPLIT(Probability::new(probable, improbable)))
+    }
+}
+
+struct MinimumDescriptionLengthStrategy {}
+
+const MINIMUM_DESCRIPTION_LENGTH_STRATEGY: MinimumDescriptionLengthStrategy =
+    MinimumDescriptionLengthStrategy {};
+
+impl ModelingStrategy for MinimumDescriptionLengthStrategy {
+    fn decide_late<M: MultinomialModelTrait, C: CountsTrait>(
+        &self,
+        fraction: f64,
+        probable: &M,
+        probable_counts: &C,
+        improbable: &M,
+        improbable_counts: &C,
+    ) -> Result<Decision> {
+        let mut probable_total = 0;
+        let mut uniform_data = vec![];
+        for c in probable_counts.iter() {
+            probable_total += c;
+            uniform_data.push(c);
+        }
+        let mut improbable_total = 0;
+        for c in improbable_counts.iter() {
+            improbable_total += c;
+            uniform_data.push(c);
+        }
+        let p = Probability::new(probable_total, improbable_total);
+        let probable_length = probable.evaluate(probable_counts)?;
+        let improbable_length = improbable.evaluate(improbable_counts)?;
+        let uniform_counts = Counts::new(uniform_data);
+        let uniform_model = MultinomialModel::Uniform {
+            fraction,
+            dimension: uniform_counts.len(),
+        };
+        let uniform_length = uniform_model.evaluate(&uniform_counts)?;
+        let split_length = (probable_counts.len() + improbable_counts.len()) as u64;
+        if uniform_length
+            < (1 + split_length + p.length()) as f64 + probable_length + improbable_length
+        {
+            Ok(UNIFORM)
+        } else {
+            Ok(SPLIT(p))
+        }
     }
 }
 

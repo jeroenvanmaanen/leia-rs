@@ -1,4 +1,7 @@
-use std::{fmt::Debug, iter::empty};
+use std::{
+    fmt::Debug,
+    iter::{Empty, empty},
+};
 
 use anyhow::{Result, anyhow};
 use rational::Rational;
@@ -30,6 +33,14 @@ impl MultinomialModel for NotSupported {
     fn evaluate<C: Counts>(&self, _counts: &C) -> Result<f64> {
         Err(anyhow!("Not supported"))
     }
+
+    fn length_of_model(&self) -> u64 {
+        0
+    }
+
+    fn length_of_data_given_model<C: Counts>(&self, _counts: &C) -> Result<f64> {
+        Ok(0.0)
+    }
 }
 
 impl Counts for NotSupported {
@@ -42,6 +53,15 @@ impl Counts for NotSupported {
     }
 
     fn iter(&self) -> impl Iterator<Item = u64> {
+        empty::<u64>()
+    }
+}
+
+impl IntoIterator for &NotSupported {
+    type Item = u64;
+    type IntoIter = Empty<u64>;
+
+    fn into_iter(self) -> Self::IntoIter {
         empty::<u64>()
     }
 }
